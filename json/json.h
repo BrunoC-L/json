@@ -63,26 +63,9 @@ namespace json {
 	>;
 
 	namespace detail {
-		template <typename T1, typename, bool>
-		struct select {
-			using type = T1;
-		};
-
-		template <typename T1, typename T2>
-		struct select<T1, T2, false> {
-			using type = T2;
-		};
-
 		using json_e = std::expected<json, json_error>;
 		using json_remaining = std::pair<json, std::string_view>;
 		using json_remaining_e = std::expected<json_remaining, json_error>;
-
-		template <bool allows_partial>
-		using select_json_return = select<
-			json_remaining_e,
-			json_e,
-			allows_partial
-		>::type;
 
 		json_remaining_e from_string(std::string_view str);
 
