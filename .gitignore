@@ -1,0 +1,6 @@
+!**.gitignore
+**.vcxproj.user
+**/x64/*
+**/Debug/*
+**/v16/*
+**/v17/*
