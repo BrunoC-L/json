@@ -5,22 +5,23 @@
 #include <vector>
 #include <expected>
 #include <sstream>
+#include <regex>
 
 namespace json {
 	struct json;
 
-	struct json_object {
+	struct object {
 		std::vector<std::pair<std::string, json>> content;
-		constexpr bool operator==(const json_object&) const = default;
+		constexpr bool operator==(const object&) const = default;
 	};
 
-	struct json_array {
+	struct array {
 		std::vector<json> content;
-		constexpr bool operator==(const json_array&) const = default;
+		constexpr bool operator==(const array&) const = default;
 	};
 
 	struct json {
-		std::variant<bool, double, std::string, json_object, json_array> content;
+		std::variant<bool, double, std::string, object, array> content;
 		constexpr bool operator==(const json&) const = default;
 	};
 
@@ -30,9 +31,7 @@ namespace json {
 
 	struct no_end_of_string { std::string content; };
 
-	struct number_contains_multiple_dots { std::string content; };
-	struct missing_number_after_negation { std::string content; };
-	struct number_contains_multiple_negation { std::string content; };
+	struct number_does_not_match_regex { std::string content; std::string assumed_number_string; };
 
 	struct no_end_of_array { std::string content; };
 	struct missing_comma_in_array { std::string content; std::string remaining; };
@@ -49,9 +48,7 @@ namespace json {
 
 		no_end_of_string,
 
-		number_contains_multiple_dots,
-		missing_number_after_negation,
-		number_contains_multiple_negation,
+		number_does_not_match_regex,
 
 		no_end_of_array,
 		missing_comma_in_array,
@@ -80,7 +77,7 @@ namespace json {
 				if (c == '\\') {
 					index += 1;
 					if (index == str.length())
-						return std::unexpected{ json_error{ no_end_of_string{ std::string{str} } } };
+						return std::unexpected{ json_error{ no_end_of_string{ std::string{ str } } } };
 					else {
 						res << str.at(index);
 						index += 1;
@@ -91,43 +88,34 @@ namespace json {
 					index += 1;
 				}
 			}
-			return std::unexpected{ json_error{ no_end_of_string{ std::string{str} } } };
+			return std::unexpected{ json_error{ no_end_of_string{ std::string{ str } } } };
 		}
 
+		constexpr char double_regex_s[53] =
+			"^" // accept only if it matches the beginning of the string
+			"(-?)" // accept a single optional negation
+			"(0|([1-9][0-9]*))" // number is either zero or some integer that does not start with zero
+			"(" // begin optional decimals
+				"\\." // require a dot
+				"[0-9]+" // any digit is fine, but at least one (std::atof does not require but chrome requires digits after dot)
+			")?" // end optional decimals
+			"(" // begin optional scientific exponent
+				"[eE]" // require an e or E
+				"[-+]?" // accept optional plus or minus
+				"[0-9]+" // any digit is fine (tested in chrome JSON.parse(1E000003) works)
+			")?" // end optional scientific exponent
+			"$" // accept only if it matches up to the end of the string
+			;
+
 		std::expected<std::pair<double, std::string_view>, json_error> number_from_string(std::string_view str) {
-			bool negate = str.at(0) == '-';
-			if (negate) {
-				if (str.length() == 1)
-					return std::unexpected{ json_error{ missing_number_after_negation{ std::string{ str } } } };
-				if (str.at(1) == '-')
-					return std::unexpected{ json_error{ number_contains_multiple_negation{ std::string{str} } } };
-				if (str.at(1) < '0' || str.at(1) > '9')
-					return std::unexpected{ json_error{ invalid_begin_character{ std::string{ str.substr(1) }}}};
-				auto non_negated = number_from_string(str.substr(1));
-				return non_negated.transform([](auto e) { return std::pair{ -e.first, std::move(e.second) }; });
-			}
-
 			auto end = std::find_if(str.begin(), str.end(), [](char c) {
-				return !(c == '.' || (c >= '0' && c <= '9'));
+				return !(c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' || c >= '0' && c <= '9');
 			});
-
-			auto used = str;
-
-			if (str.end() != end)
-				used = str.substr(0, end - str.begin());
-
-			auto first_dot = std::find(used.begin(), used.end(), '.');
-
-			if (auto has_dot = first_dot != used.end()) {
-				if (auto has_second_dot = std::find(first_dot + 1, used.end(), '.') != used.end())
-					return std::unexpected{ json_error{ number_contains_multiple_dots{ std::string{used} } } };
-
-				return std::pair{ double(std::atof(used.data())), str.substr(used.length()) };
-			}
-			else {
-				std::string buffer = "";
-				return std::pair{ double(std::atoi(used.data())), str.substr(used.length()) };
-			}
+			std::string data{ str.begin(), end };
+			if (std::regex_match(data, std::regex{ double_regex_s }))
+				return std::pair{ std::atof(data.c_str()), str.substr(end - str.begin()) };
+			else
+				return std::unexpected{ json_error{ number_does_not_match_regex{ std::string{ str }, data } } };
 		}
 
 		std::string_view parse_whitespaces(std::string_view str) {
@@ -142,7 +130,7 @@ namespace json {
 			return str.substr(index);
 		}
 
-		std::expected<std::pair<json_object, std::string_view>, json_error> object_from_string(std::string_view str) {
+		std::expected<std::pair<object, std::string_view>, json_error> object_from_string(std::string_view str) {
 			std::vector<std::pair<std::string, json>> result;
 
 			constexpr size_t size_of_opening_object = std::string{ "{" }.length();
@@ -151,25 +139,25 @@ namespace json {
 			while (true) {
 				remaining = parse_whitespaces(remaining);
 				if (remaining.length() == 0)
-					return std::unexpected{ json_error{ no_end_of_object{ std::string{str} } } };
+					return std::unexpected{ json_error{ no_end_of_object{ std::string{ str } } } };
 				char c = remaining.at(0);
 				if (c == '}')
-					return std::pair{ json_object{ std::move(result) }, remaining.substr(1) };
+					return std::pair{ object{ std::move(result) }, remaining.substr(1) };
 				if (bool requires_comma = !result.empty()) {
 					if (c == ',') {
 						remaining = parse_whitespaces(remaining.substr(1));
 						if (remaining.length() == 0)
-							return std::unexpected{ json_error{ no_end_of_object{ std::string{str} } } };
+							return std::unexpected{ json_error{ no_end_of_object{ std::string{ str } } } };
 						c = remaining.at(0);
 					}
 					else
 						return std::unexpected{ json_error{ missing_comma_in_object{
-							std::string{str},
+							std::string{ str },
 							std::string{remaining}
 						} } };
 				}
 				if (remaining.length() == 0)
-					return std::unexpected{ json_error{ no_end_of_object{ std::string{str} } } };
+					return std::unexpected{ json_error{ no_end_of_object{ std::string{ str } } } };
 
 				if (c == '"' || c == '\'') {
 					auto property_name_or_error = string_from_string(remaining);
@@ -181,7 +169,7 @@ namespace json {
 						remaining = parse_whitespaces(remaining);
 						char c = remaining.at(0);
 						if (c != ':') {
-							return std::unexpected{ missing_semicolon{ std::string{str} } };
+							return std::unexpected{ missing_semicolon{ std::string{ str } } };
 						}
 						else {
 							remaining = parse_whitespaces(remaining.substr(1));
@@ -196,11 +184,11 @@ namespace json {
 					}
 				}
 				else
-					return std::unexpected{ missing_property_name_string_in_object{ std::string{str}, std::string{remaining} } };
+					return std::unexpected{ missing_property_name_string_in_object{ std::string{ str }, std::string{remaining} } };
 			}
 		}
 
-		std::expected<std::pair<json_array, std::string_view>, json_error> array_from_string(std::string_view str) {
+		std::expected<std::pair<array, std::string_view>, json_error> array_from_string(std::string_view str) {
 			std::vector<json> result;
 
 			constexpr size_t size_of_opening_array = std::string{ "[" }.length();
@@ -209,21 +197,21 @@ namespace json {
 			while (true) {
 				remaining = parse_whitespaces(remaining);
 				if (remaining.length() == 0)
-					return std::unexpected{ json_error{ no_end_of_array{ std::string{str} } } };
+					return std::unexpected{ json_error{ no_end_of_array{ std::string{ str } } } };
 				char c = remaining.at(0);
 				if (c == ']')
-					return std::pair{ json_array{ std::move(result) }, remaining.substr(1) };
+					return std::pair{ array{ std::move(result) }, remaining.substr(1) };
 				if (bool requires_comma = !result.empty()) {
 					if (c == ',')
 						remaining = parse_whitespaces(remaining.substr(1));
 					else
 						return std::unexpected{ json_error{ missing_comma_in_array{
-							std::string{str},
+							std::string{ str },
 							std::string{remaining}
 						} } };
 				}
 				if (remaining.length() == 0)
-					return std::unexpected{ json_error{ no_end_of_array{ std::string{str} } } };
+					return std::unexpected{ json_error{ no_end_of_array{ std::string{ str } } } };
 
 				auto next = from_string(remaining);
 				if (next.has_value()) {
@@ -259,7 +247,7 @@ namespace json {
 			if (str.starts_with("false"))
 				return json_remaining{ json{ false }, str.substr(5) };
 
-			return std::unexpected{ json_error{ invalid_begin_character{ std::string{str} } } };
+			return std::unexpected{ json_error{ invalid_begin_character{ std::string{ str } } } };
 		}
 
 		json_e from_string_no_partial(std::string_view str) {
@@ -276,7 +264,42 @@ namespace json {
 		}
 	}
 
-	std::expected<json, json_error> from_string(std::string_view str) {
+	auto from_string(std::string_view str) {
 		return detail::from_string_no_partial(str);
+	}
+
+	bool json_object_property_exists(object& object, std::string property_name) {
+		for (const auto& [a, b] : object.content)
+			if (a == property_name)
+				return true;
+		return false;
+	}
+
+	struct property_not_found {
+		std::string property_name;
+		object object;
+	};
+
+	std::expected<std::reference_wrapper<json>, property_not_found> json_object_at_ref(object& object, std::string property_name) {
+		for (auto& [a, b] : object.content)
+			if (a == property_name)
+				return b;
+		return std::unexpected{ property_not_found{ property_name, object } };
+	}
+
+	std::expected<std::reference_wrapper<const json>, property_not_found> json_object_at_ref(const object& object, std::string property_name) {
+		for (auto& [a, b] : object.content)
+			if (a == property_name)
+				return b;
+		return std::unexpected{ property_not_found{ property_name, object } };
+	}
+
+	std::expected<std::reference_wrapper<const json>, property_not_found> json_object_at_ref(object&& object, std::string property_name) = delete;
+
+	std::expected<json, property_not_found> json_object_at_copy(const object& object, std::string property_name) {
+		for (auto& [a, b] : object.content)
+			if (a == property_name)
+				return b;
+		return std::unexpected{ property_not_found{ property_name, object } };
 	}
 }
